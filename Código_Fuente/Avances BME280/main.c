@@ -1,44 +1,48 @@
-#define F_CPU 8000000UL
+#define F_CPU 8000000UL // Frecuencia del ATmega328pb
 #include <avr/io.h>
 #include <util/delay.h>
-#include <avr/interrupt.h>
-#include <avr/eeprom.h>
-#include <avr/wdt.h>
+#include <avr/interrupt.h> // Interrupciones
+#include <avr/eeprom.h> // Librería para eeprom
+#include <avr/wdt.h> // Funciones del WDT
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <avr/eeprom.h>
-#include "twi1.h"
+#include "twi1.h" // Librería propia utilizada para I2C
 
 // Configuración
 #define SLEEP_CYCLES 75  // Número de ciclos WDT antes de enviar (se multiplica por 8s y te da el tiempo total)
-#define BAUD 9600
-#define UBRR_VALUE ((F_CPU/16/BAUD)-1)
+#define BAUD 9600 // Baudrate UART
+#define UBRR_VALUE ((F_CPU/16/BAUD)-1) // Cálculo del valor para registro UBRR
 
-// UART 
+// Inicializa UART0 (TX/RX del microcontrolador) 
 void UART_init(void){
+	// Inicializa UART con 8N1 y habilita transmisión
 	UBRR0H = (uint8_t)(UBRR_VALUE >> 8);
 	UBRR0L = (uint8_t)(UBRR_VALUE & 0xFF);
 	UCSR0C = (1<<UCSZ01) | (1<<UCSZ00); // 8N1
-	UCSR0B = (1<<TXEN0);
+	UCSR0B = (1<<TXEN0); // Habilita transmisión
 }
 
 void UART_send_char(char c){
-	while(!(UCSR0A & (1<<UDRE0)));
+	// Envía un solo carácter por UART
+	while(!(UCSR0A & (1<<UDRE0))); // Espera a que el buffer esté vacío
 	UDR0 = c;
 }
 
 void UART_send_str(const char *s){
+	// Envía un string por UART
 	while(*s) UART_send_char(*s++);
 }
 
 // BME280 
-#define BME280_ADDR 0x76
-int32_t t_fine;
-uint16_t dig_T1; int16_t dig_T2, dig_T3;
-uint16_t dig_P1; int16_t dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9;
-uint8_t dig_H1; int16_t dig_H2; uint8_t dig_H3; int16_t dig_H4, dig_H5; int8_t dig_H6;
+#define BME280_ADDR 0x76 // Dirección I2C del sensor (depende de la conexión del SDO, VCC= 0x77 / GND= 0x76)
+int32_t t_fine; // Variable interna para compensaciones
+uint16_t dig_T1; int16_t dig_T2, dig_T3; // Coeficientes calibración temperatura
+uint16_t dig_P1; int16_t dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9; // Presión
+uint8_t dig_H1; int16_t dig_H2; uint8_t dig_H3; int16_t dig_H4, dig_H5; int8_t dig_H6; // Humedad
 
+// Escribe un registro del BME280
 void BME280_write(uint8_t reg, uint8_t val) {
 	TWI1_start();
 	TWI1_write(BME280_ADDR << 1);
@@ -47,6 +51,7 @@ void BME280_write(uint8_t reg, uint8_t val) {
 	TWI1_stop();
 }
 
+// Lee un registro del BME280
 uint8_t BME280_read(uint8_t reg) {
 	uint8_t val;
 	TWI1_start();
@@ -59,8 +64,10 @@ uint8_t BME280_read(uint8_t reg) {
 	return val;
 }
 
+// Reset del BME280
 void BME280_reset(void) { BME280_write(0xE0, 0xB6); _delay_ms(100); }
 
+// Leer coeficientes de calibración
 void BME280_readCalibration(void){
 	dig_T1=(uint16_t)(BME280_read(0x88)|(BME280_read(0x89)<<8));
 	dig_T2=(int16_t)(BME280_read(0x8A)|(BME280_read(0x8B)<<8));
@@ -82,17 +89,19 @@ void BME280_readCalibration(void){
 	dig_H6=(int8_t)BME280_read(0xE7);
 }
 
+// Configuración inicial del BME280
 void BME280_init(void){
-	BME280_write(0xF2,0x01);
-	BME280_write(0xF4,0xAF);
-	BME280_write(0xF5,0x00);
+	BME280_write(0xF2,0x01); // Oversampling humedad x1
+	BME280_write(0xF4,0xAF); // Temp x1, Presión x16, Normal mode
+	BME280_write(0xF5,0x00); // Filtro off
 }
 
+// Leer datos RAW del sensor
 void BME280_readRaw(int32_t *T, int32_t *P, int32_t *H){
 	uint8_t buf[8];
 	TWI1_start();
 	TWI1_write(BME280_ADDR<<1);
-	TWI1_write(0xF7);
+	TWI1_write(0xF7); // Registro inicial de presión
 	TWI1_start();
 	TWI1_write((BME280_ADDR<<1)|1);
 	for(uint8_t i=0;i<7;i++) buf[i]=TWI1_readACK();
@@ -103,13 +112,15 @@ void BME280_readRaw(int32_t *T, int32_t *P, int32_t *H){
 	*H=((int32_t)buf[6]<<8)|buf[7];
 }
 
+// Compensar temperatura
 int32_t compensate_T(int32_t adc_T){
 	int32_t var1 = ((((adc_T>>3)-((int32_t)dig_T1<<1)))*dig_T2)>>11;
 	int32_t var2 = (((((adc_T>>4)-dig_T1)*((adc_T>>4)-dig_T1))>>12)*dig_T3)>>14;
 	t_fine=var1+var2;
-	return (t_fine*5+128)>>8;
+	return (t_fine*5+128)>>8; // Temperatura en centigrados x100
 }
 
+// Compensar presión
 uint32_t compensate_P(int32_t adc_P){
 	int64_t var1,var2,p;
 	var1=(int64_t)t_fine-128000;
@@ -125,9 +136,10 @@ uint32_t compensate_P(int32_t adc_P){
 	var2=((int64_t)dig_P8*p)>>19;
 	p=(p+var1+var2)>>8;
 	p+=(int64_t)dig_P7<<4;
-	return (uint32_t)p;
+	return (uint32_t)p;  // Presión en Pa
 }
 
+// Compensar humedad
 uint32_t compensate_H(int32_t adc_H){
 	int32_t v_x1 = t_fine-76800;
 	v_x1=((((((adc_H<<14)-((int32_t)dig_H4<<20)-(dig_H5*v_x1))+16384)>>15)*
@@ -135,7 +147,7 @@ uint32_t compensate_H(int32_t adc_H){
 	v_x1-=( (((v_x1>>15)*(v_x1>>15))>>7 * dig_H1)>>4);
 	if(v_x1<0)v_x1=0;
 	if(v_x1>419430400)v_x1=419430400;
-	return v_x1>>12;
+	return v_x1>>12; // Humedad relativa %
 }
 
 // EEPROM 
@@ -148,33 +160,37 @@ typedef struct {
 #define EEPROM_ADDR 0x00
 
 void eeprom_write_data(sensor_data_t *data){
+	 // Guardar bloque completo en EEPROM
 	eeprom_write_block((const void*)data,(void*)EEPROM_ADDR,sizeof(sensor_data_t));
 }
 
 void eeprom_read_data(sensor_data_t *data){
+	// Leer bloque completo desde EEPROM
 	eeprom_read_block((void*)data,(const void*)EEPROM_ADDR,sizeof(sensor_data_t));
 }
 
 // Sigfox 
 void sigfox_send_sensor(sensor_data_t *data){
+	// Enviar datos como payload hexadecimal concatenado
 	char buf[32];
 	snprintf(buf,sizeof(buf),"AT$SF=%04X%04X%04X\r",data->temp,data->pres,data->hum);
 	UART_send_str(buf);
-	_delay_ms(1500);
+	_delay_ms(1500); // Delay para evitar sobrecarga en transmisión
 }
 
 // Watchdog 
-volatile uint8_t wdt_counter = 0;
+volatile uint8_t wdt_counter = 0;  // Contador de ciclos WDT
 
-ISR(WDT_vect){ wdt_counter++; }
+ISR(WDT_vect){ wdt_counter++; }  // incrementa contador
 
 void wdt_init_interrupt(void){
 	cli();
-	WDTCSR |= (1<<WDCE)|(1<<WDE);
+	WDTCSR |= (1<<WDCE)|(1<<WDE); // Permitir cambios
 	WDTCSR = (1<<WDIE)|(1<<WDP3)|(1<<WDP0); // 8s
 	sei();
 }
 
+// Sleep profundo modo Power-Down
 void enter_sleep(void){
 	MCUCR |= (1<<SE)|(1<<SM1);
 	asm volatile("sleep");
@@ -183,6 +199,7 @@ void enter_sleep(void){
 
 // Main
 int main(void){
+	// Inicializaciones
 	UART_init();
 	TWI1_init();
 	BME280_reset();
@@ -200,15 +217,18 @@ int main(void){
 			wdt_counter = 0;
 
 			int32_t T_raw,P_raw,H_raw;
-			BME280_readRaw(&T_raw,&P_raw,&H_raw);
+			BME280_readRaw(&T_raw,&P_raw,&H_raw); // Leer datos crudos
+			// Compensar
 			datos.temp = compensate_T(T_raw);
 			datos.pres = compensate_P(P_raw)/256;
 			datos.hum  = compensate_H(H_raw)/4;
 
+			// Enviar solo si hay cambios respecto al último envío
 			if(memcmp(&datos,&ultimo,sizeof(sensor_data_t))!=0){
 				sigfox_send_sensor(&datos);
 				eeprom_write_data(&datos);
-				memcpy(&ultimo,&datos,sizeof(sensor_data_t));
+				memcpy(&ultimo,&datos,sizeof(sensor_data_t)); // Guardar último valor
+
 			}
 		}
 	}
